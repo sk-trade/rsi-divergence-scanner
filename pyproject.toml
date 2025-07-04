@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "crypto-divergence-scanner"
-version = "0.1.0"
+version = "0.1.1"
 description = ""
 authors = ["sanghun9634 <sanghun9634@gmail.com>"]
 readme = "README.md"

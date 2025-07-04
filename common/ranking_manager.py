@@ -31,7 +31,7 @@ class RankingManager:
         with self.lock:
             return self.current_sessions[mode].copy() if self.current_sessions[mode] else None
 
-    def _format_board(self, board, highlight_index=-1):
+    def _format_board(self, board, board_type: str, highlight_index=-1):
         """랭킹 보드를 예쁘게 포맷하는 내부 헬퍼 함수"""
         if not board: 
             return f"  (현재 {'저점' if board_type == 'low' else '고점'} 랭킹 데이터 없음)"
@@ -52,13 +52,13 @@ class RankingManager:
             lines.append(f"  ... (총 {len(board)}개)")
         return "\n".join(lines)
 
-    def _get_potential_rank_index(self, session_to_check, board_type):
+    def _get_potential_rank_index(self, session_to_check, board):
         """잠재적 랭킹 인덱스를 계산하는 내부 헬퍼 함수"""
         if not session_to_check: return None
         
         with self.lock:
-            board = self.boards[board_type]
-            reverse_sort = (board_type == 'high')
+            board = self.boards[board]
+            reverse_sort = (board == 'high')
             temp_board = sorted(board + [session_to_check], key=lambda x: x['price'], reverse=reverse_sort)
         try:
             return temp_board.index(session_to_check)
