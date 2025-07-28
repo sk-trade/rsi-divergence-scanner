@@ -196,21 +196,21 @@ class ChartAnalyzer:
             self.ranking_manager.start_seeking('high', latest_price, latest_timestamp, indicator_data, context_info)
             self.divergence_tracker['high']['last_point'] = None
         
-        elif self.ranking_manager.is_seeking('high') and latest['rsi'] > config.RSI_HIGH_EXIT_THRESHOLD:
+        elif self.ranking_manager.is_seeking('high') and latest['rsi'] >= config.RSI_HIGH_THRESHOLD:
             current_high_session = self.ranking_manager.get_current_session_info('high')
             if current_high_session and latest_price > current_high_session['price']:
                 last_high_point = self.divergence_tracker['high']['last_point']
                 if last_high_point and latest_price > last_high_point['price'] and indicator_data['rsi'] < last_high_point['indicators']['rsi']:
                     div_msg = (f"📉📉📉 약세 다이버전스 출현 가능성! 📉📉📉\n"
-                               f" - 가격: {last_high_point['price']:,.0f}원 -> {latest_price:,.0f}원 (상승)\n"
-                               f" - RSI: {last_high_point['indicators']['rsi']:.2f} -> {indicator_data['rsi']:.2f} (하락)")
+                            f" - 가격: {last_high_point['price']:,.0f}원 -> {latest_price:,.0f}원 (상승)\n"
+                            f" - RSI: {last_high_point['indicators']['rsi']:.2f} -> {indicator_data['rsi']:.2f} (하락)")
                     logger.warning(div_msg)
                     send_direct_webhook(div_msg)
                 
                 self.divergence_tracker['high']['last_point'] = {'price': latest_price, 'indicators': indicator_data, 'timestamp': latest_timestamp}
             self.ranking_manager.update_if_needed('high', latest_price, latest_timestamp, indicator_data)
 
-        elif latest['rsi'] <= config.RSI_HIGH_EXIT_THRESHOLD and self.ranking_manager.is_seeking('high'):
+        elif self.ranking_manager.is_seeking('high') and latest['rsi'] <= config.RSI_HIGH_EXIT_THRESHOLD:
             final_high_session = self.ranking_manager.get_current_session_info('high')
             if final_high_session:
                 pullback_percent = ((final_high_session['price'] - latest_price) / final_high_session['price']) * 100
