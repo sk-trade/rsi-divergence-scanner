@@ -23,59 +23,14 @@ class ChartAnalyzer:
     """
     def __init__(self, ranking_manager: RankingManager):
         self.ranking_manager = ranking_manager
-        self.df = pd.DataFrame()
         
+        # 상태를 클래스 내부에 캡슐화
         self.divergence_tracker = {
             'low': {'last_point': None},
             'high': {'last_point': None}
         }
         
-        self.max_data_length = config.LONG_TERM_MA_WINDOW + config.MARKET_STRUCTURE_CANDLE_COUNT + 150
-
-      
-    def _update_dataframe(self, candle_deque: deque):
-        """
-        새로운 캔들 데이터를 DataFrame에 효율적으로 추가하고,
-        실시간으로 업데이트되는 현재 캔들을 정확하게 반영
-        """
-        if not candle_deque:
-            return False
-            
-        latest_candle = candle_deque[-1]
-        
-        # DataFrame이 비어있으면 전체 deque로 초기화
-        if self.df.empty:
-            self.df = pd.DataFrame(list(candle_deque))
-            # 초기화 후 타입 변환을 한 번 수행
-            self.df = self.df.astype({
-                'open': 'float',
-                'high': 'float',
-                'low': 'float',
-                'close': 'float',
-                'volume': 'float'
-            })
-        # DataFrame에 데이터가 있을 경우
-        else:
-            # 기존 캔들 업데이트 (타임스탬프가 마지막 행과 동일)
-            if self.df.iloc[-1]['timestamp'] == latest_candle['timestamp']:
-                # 마지막 행의 데이터를 최신 캔들 정보로 덮어쓰기
-                self.df.iloc[-1, self.df.columns.get_loc('high')] = latest_candle['high']
-                self.df.iloc[-1, self.df.columns.get_loc('low')] = latest_candle['low']
-                self.df.iloc[-1, self.df.columns.get_loc('close')] = latest_candle['close']
-                self.df.iloc[-1, self.df.columns.get_loc('volume')] = latest_candle['volume']
-            
-            # 새로운 캔들 추가 (타임스탬프가 변경됨)
-            else:
-                new_row = pd.DataFrame([latest_candle])
-                self.df = pd.concat([self.df, new_row], ignore_index=True)
-
-        # 오래된 데이터 제거
-        if len(self.df) > self.max_data_length:
-            self.df = self.df.iloc[-self.max_data_length:].reset_index(drop=True)
-            
-        return True
-
-    def _calculate_vpoc(self, df: pd.DataFrame, bin_size_multiplier: float = 0.001) -> Optional[float]:
+    def _calculate_vpoc(self, df: pd.DataFrame, bin_size_multiplier: float = 0.005) -> Optional[float]:
         """
         캔들의 고가/저가 범위를 모두 고려하여 더 정확한 VPOC(거래량 최다 집중 가격대)를 계산
         """
@@ -87,17 +42,12 @@ class ChartAnalyzer:
         if bin_size <= 0:
             return None
 
-        # 가격대별 거래량을 저장할 딕셔너리
         volume_profile = {}
-
         for _, row in df.iterrows():
             low_bin = int(row['low'] / bin_size)
             high_bin = int(row['high'] / bin_size)
             num_bins = high_bin - low_bin + 1
-            
-            # 캔들 하나의 거래량을 해당 캔들이 포함하는 가격대에 균등하게 분배
             volume_per_bin = row['volume'] / num_bins if num_bins > 0 else 0
-
             for bin_index in range(low_bin, high_bin + 1):
                 price_level = bin_index * bin_size
                 volume_profile[price_level] = volume_profile.get(price_level, 0) + volume_per_bin
@@ -105,7 +55,6 @@ class ChartAnalyzer:
         if not volume_profile:
             return None
         
-        # 거래량이 가장 많은 가격대를 반환
         return max(volume_profile, key=volume_profile.get)
 
 
@@ -120,28 +69,32 @@ class ChartAnalyzer:
             return
 
         # --- 데이터 준비 ---
-
-        # 데이터 무결성 및 최소 개수 확인
         if len(base_candle_deque) < config.LONG_TERM_MA_WINDOW + 1:
             return
         
-        # DataFrame 업데이트 로직 호출
-        if not self._update_dataframe(base_candle_deque):
-            return 
+        df = pd.DataFrame(list(base_candle_deque))
+        try:
+            df['close'] = df['close'].astype(float)
+            df['high'] = df['high'].astype(float)
+            df['low'] = df['low'].astype(float)
+            df['volume'] = df['volume'].astype(float)
+        except (KeyError, TypeError) as e:
+            logger.error(f"데이터프레임 처리 중 필수 컬럼 오류: {e}")
+            return
 
         # 지표 계산
-        self.df['rsi'] = ta.momentum.RSIIndicator(self.df['close'], window=config.RSI_WINDOW).rsi()
-        self.df['ma_long'] = ta.trend.sma_indicator(self.df['close'], window=config.LONG_TERM_MA_WINDOW)
+        df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=config.RSI_WINDOW).rsi()
+        df['ma_long'] = ta.trend.sma_indicator(df['close'], window=config.LONG_TERM_MA_WINDOW)
         
-        latest = self.df.iloc[-1]
+        latest = df.iloc[-1]
         if pd.isna(latest['rsi']) or pd.isna(latest['ma_long']):
             return
 
         # 시장 컨텍스트 정의
         current_trend = "상승" if latest['close'] > latest['ma_long'] else "하락"
 
-        # VPOC 계산
-        recent_data_for_vpoc = self.df.tail(config.MARKET_STRUCTURE_CANDLE_COUNT)
+        # VPOC 계산 (개선된 로직은 유지)
+        recent_data_for_vpoc = df.tail(config.MARKET_STRUCTURE_CANDLE_COUNT)
         most_traded_level = self._calculate_vpoc(recent_data_for_vpoc)
 
         # 상태 메시지 및 데이터 준비
@@ -164,9 +117,12 @@ class ChartAnalyzer:
             self.ranking_manager.start_seeking('low', latest_price, latest_timestamp, indicator_data, context_info)
             self.divergence_tracker['low']['last_point'] = None
 
+        # 탐색 진행 조건: 탐색 중 & 아직 과매도 구간을 벗어나지 않았을 때
         elif self.ranking_manager.is_seeking('low') and latest['rsi'] < config.RSI_EXIT_THRESHOLD:
+            # 더 낮은 저점이 나오면 갱신
             current_low_session = self.ranking_manager.get_current_session_info('low')
             if current_low_session and latest_price < current_low_session['price']:
+                # 다이버전스 체크 
                 last_low_point = self.divergence_tracker['low']['last_point']
                 if last_low_point and latest_price < last_low_point['price'] and indicator_data['rsi'] > last_low_point['indicators']['rsi']:
                     div_msg = (f"🔥🔥🔥 강세 다이버전스 출현 가능성! 🔥🔥🔥\n"
@@ -174,15 +130,16 @@ class ChartAnalyzer:
                                f" - RSI: {last_low_point['indicators']['rsi']:.2f} -> {indicator_data['rsi']:.2f} (상승)")
                     logger.warning(div_msg)
                     send_direct_webhook(div_msg)
-                
                 self.divergence_tracker['low']['last_point'] = {'price': latest_price, 'indicators': indicator_data, 'timestamp': latest_timestamp}
+            
+            # 가격이 더 낮아졌을 때만 갱신하도록 RankingManager에 위임
             self.ranking_manager.update_if_needed('low', latest_price, latest_timestamp, indicator_data)
 
-        elif latest['rsi'] >= config.RSI_EXIT_THRESHOLD and self.ranking_manager.is_seeking('low'):
+        # 탐색 종료 조건: 탐색 중 & 과매도 구간을 벗어났을 때
+        elif self.ranking_manager.is_seeking('low') and latest['rsi'] >= config.RSI_EXIT_THRESHOLD:
             final_low_session = self.ranking_manager.get_current_session_info('low')
             if final_low_session:
                 rebound_percent = ((latest_price - final_low_session['price']) / final_low_session['price']) * 100
-                
                 context_info = ""
                 if most_traded_level and abs(final_low_session['price'] - most_traded_level) / most_traded_level < (config.KEY_LEVEL_TOLERANCE_PERCENT / 100):
                     context_info = " (🔥핵심 지지 구간에서 반등!)"
@@ -190,15 +147,19 @@ class ChartAnalyzer:
             else:
                 self.ranking_manager.end_seeking('low', 0.0)
 
-        # 고점 탐색 전략
+        # --- 고점 탐색 전략 ---
+        # 탐색 시작 조건: 과매수 진입 & 탐색 중이 아닐 때
         if latest['rsi'] >= config.RSI_HIGH_THRESHOLD and not self.ranking_manager.is_seeking('high'):
             context_info = f" ({current_trend} 추세 중)"
             self.ranking_manager.start_seeking('high', latest_price, latest_timestamp, indicator_data, context_info)
             self.divergence_tracker['high']['last_point'] = None
         
-        elif self.ranking_manager.is_seeking('high') and latest['rsi'] >= config.RSI_HIGH_THRESHOLD:
+        # 탐색 진행 조건: 탐색 중 & 아직 과매수 구간을 벗어나지 않았을 때
+        elif self.ranking_manager.is_seeking('high') and latest['rsi'] > config.RSI_HIGH_EXIT_THRESHOLD:
+            # 더 높은 고점이 나오면 갱신
             current_high_session = self.ranking_manager.get_current_session_info('high')
             if current_high_session and latest_price > current_high_session['price']:
+                # 다이버전스 체크
                 last_high_point = self.divergence_tracker['high']['last_point']
                 if last_high_point and latest_price > last_high_point['price'] and indicator_data['rsi'] < last_high_point['indicators']['rsi']:
                     div_msg = (f"📉📉📉 약세 다이버전스 출현 가능성! 📉📉📉\n"
@@ -206,14 +167,16 @@ class ChartAnalyzer:
                             f" - RSI: {last_high_point['indicators']['rsi']:.2f} -> {indicator_data['rsi']:.2f} (하락)")
                     logger.warning(div_msg)
                     send_direct_webhook(div_msg)
-                
                 self.divergence_tracker['high']['last_point'] = {'price': latest_price, 'indicators': indicator_data, 'timestamp': latest_timestamp}
+            
+            # 가격이 더 높아졌을 때만 갱신하도록 RankingManager에 위임
             self.ranking_manager.update_if_needed('high', latest_price, latest_timestamp, indicator_data)
 
+        # 탐색 종료 조건: 탐색 중 & 과매수 구간을 벗어났을 때
         elif self.ranking_manager.is_seeking('high') and latest['rsi'] <= config.RSI_HIGH_EXIT_THRESHOLD:
             final_high_session = self.ranking_manager.get_current_session_info('high')
             if final_high_session:
-                pullback_percent = ((final_high_session['price'] - latest_price) / final_high_session['price']) * 100
+                pullback_percent = ((final_high_session['price'] - final_high_session['price']) / final_high_session['price']) * 100
                 context_info = ""
                 if most_traded_level and abs(final_high_session['price'] - most_traded_level) / most_traded_level < (config.KEY_LEVEL_TOLERANCE_PERCENT / 100):
                     context_info = " (⚠️핵심 저항 구간에서 하락!)"
@@ -252,6 +215,8 @@ if __name__ == "__main__":
             logger.info("종료 절차를 시작합니다...")
             client.stop()
             ranking_manager.stop_manager_thread()
+            logger.info("최종 랭킹 데이터를 파일에 저장합니다.")
+            ranking_manager._save_boards()
             logger.warning(ranking_manager.get_final_ranking_board_message())
             shutdown_logger()
             print(f"\n--- {CLIENT_ID}: 모든 작업 완료 ---")

@@ -35,6 +35,7 @@ RSI_EXIT_THRESHOLD = 35 # 탐색 종료 RSI 기준 (채터링 방지)
 RSI_HIGH_THRESHOLD = 70 # 탐색 시작 RSI 기준
 RSI_HIGH_EXIT_THRESHOLD = 65 # 탐색 종료 RSI 기준 (채터링 방지)
 # --- 랭킹 시스템 설정 ---
+RANKING_DATA_FILE = "data/ranking_data.json"
 RANKING_MAX_COUNT = 100 # 랭킹 보드에 저장할 최대 개수
 RANKING_VALID_DAYS = 7  # 랭킹 데이터 및 캔들 데이터의 유효 기간 (일)
 NOTIFICATION_COOLDOWN_SECONDS = 10 # 웹훅 쿨다운
