@@ -2,6 +2,8 @@ import threading
 import time
 import pandas as pd
 import logging
+import os 
+import orjson 
 
 import config
 from common.logger_setup import send_direct_webhook
@@ -12,6 +14,7 @@ class RankingManager:
     def __init__(self):
         self.lock = threading.Lock()
         self.filepath = config.RANKING_DATA_FILE
+        self.directory = os.path.dirname(self.filepath)
         
         self.boards = {'low': [], 'high': []}
         self.seeking_status = {'low': False, 'high': False}
@@ -30,7 +33,6 @@ class RankingManager:
         try:
             with open(self.filepath, 'rb') as f:
                 data = orjson.loads(f.read())
-                # 파일에 'low' 또는 'high' 키가 있는지 확인
                 if 'low' in data and 'high' in data:
                     with self.lock:
                         self.boards = data
@@ -39,19 +41,25 @@ class RankingManager:
                     logger.warning(f"'{self.filepath}' 파일의 형식이 올바르지 않습니다. 새 랭킹으로 시작합니다.")
         except FileNotFoundError:
             logger.info("랭킹 데이터 파일이 없습니다. 새 랭킹으로 시작합니다.")
+        except orjson.JSONDecodeError:
+            logger.error(f"'{self.filepath}' 파일의 JSON 형식이 손상되었습니다. 새 랭킹으로 시작합니다.")
         except Exception as e:
             logger.error(f"랭킹 데이터 로드 중 오류 발생: {e}")
 
     def _save_boards(self):
         """현재 랭킹 보드를 파일에 저장합니다."""
         try:
+            if not os.path.exists(self.directory):
+                os.makedirs(self.directory)
+                logger.info(f"랭킹 데이터 디렉토리 '{self.directory}'를 생성했습니다.")
+
             with self.lock:
-                # orjson.dumps는 bytes를 반환하므로 'wb' 모드로 열어야 함
                 with open(self.filepath, 'wb') as f:
                     f.write(orjson.dumps(self.boards))
             logger.debug("랭킹 데이터를 파일에 저장했습니다.")
         except Exception as e:
-            logger.error(f"랭킹 데이터 저장 중 오류 발생: {e}")
+            logger.error(f"랭킹 데이터 저장 중 오류 발생: {e}", exc_info=True)
+
     def is_seeking(self, mode: str) -> bool:
         """현재 해당 모드(low/high)로 탐색 중인지 확인합니다."""
         return self.seeking_status.get(mode, False)
