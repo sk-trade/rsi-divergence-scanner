@@ -46,13 +46,16 @@ class ZMQClient:
         self.storage_lock = threading.Lock() # `candle_deques`에 대한 동시 접근을 막기 위한 락
         self.data_updated_event = threading.Event() # 데이터 업데이트 시 전략 실행을 트리거하기 위한 이벤트 (디바운싱용)
 
+        self.consecutive_renewal_failures = 0
+        self.MAX_CONSECUTIVE_FAILURES = 3 
+        
         # 각 인터벌별 캔들 데이터를 저장하는 딕셔너리
         self.candle_deques: Dict[str, deque] = {
             interval: deque(maxlen=CANDLE_DEQUE_MAXLEN) for interval in self.intervals
         }
         self.threads: List[threading.Thread] = []
 
-    def _send_request(self, request: dict) -> Optional[dict]:
+    def _send_request(self, request: dict, max_retries: int = 5, initial_delay: int = 2) -> Optional[dict]:
         """
         ZMQ REQ 소켓을 사용해 게이트웨이에 동기식 요청을 보내고 응답을 받습니다.
 
@@ -62,21 +65,40 @@ class ZMQClient:
         Returns:
             Optional[dict]: 게이트웨이로부터 받은 응답. 타임아웃 또는 오류 발생 시 None을 반환.
         """
-        socket_req = self.context.socket(zmq.REQ)
-        socket_req.setsockopt(zmq.RCVTIMEO, 5000) # 5초 타임아웃 설정
-        socket_req.setsockopt(zmq.LINGER, 0)      # 소켓 즉시 종료
-        socket_req.connect(f"tcp://{ZMQ_GATEWAY_HOST}:{ZMQ_GATEWAY_REQ_PORT}")
-        try:
-            socket_req.send(orjson.dumps(request))
-            return orjson.loads(socket_req.recv())
-        except zmq.Again:
-            logger.warning(f"ZMQ 게이트웨이 응답 시간 초과. 서버가 오프라인일 수 있습니다.")
-            return None
-        except Exception as e:
-            logger.error(f"ZMQ 요청 중 예기치 않은 오류 발생: {e}")
-            return None
-        finally:
-            socket_req.close()
+        delay = initial_delay
+        for attempt in range(max_retries):
+            # 매 시도마다 새로운 소켓을 생성하여 연결 상태를 초기화합니다.
+            socket_req = self.context.socket(zmq.REQ)
+            socket_req.setsockopt(zmq.RCVTIMEO, 10000) # 타임아웃을 10초로 조금 늘려 안정성 확보
+            socket_req.setsockopt(zmq.LINGER, 0)
+            socket_req.connect(f"tcp://{ZMQ_GATEWAY_HOST}:{ZMQ_GATEWAY_REQ_PORT}")
+
+            try:
+                socket_req.send(orjson.dumps(request))
+                response = orjson.loads(socket_req.recv())
+                return response  # 성공 시 즉시 응답 반환
+            
+            except zmq.Again:
+                logger.warning(
+                    f"ZMQ 게이트웨이 응답 시간 초과 (시도 {attempt + 1}/{max_retries})."
+                )
+            
+            except Exception as e:
+                logger.error(
+                    f"ZMQ 요청 중 오류 발생 (시도 {attempt + 1}/{max_retries}): {e}"
+                )
+            finally:
+                socket_req.close()
+
+            # 마지막 시도가 아니면 대기
+            if attempt < max_retries - 1:
+                logger.info(f"{delay}초 후 재시도합니다...")
+                time.sleep(delay)
+                delay = min(delay * 2, 30) # 대기 시간을 2배씩 늘리되, 최대 30초까지만
+
+        logger.error(f"최대 재시도 횟수({max_retries}회)를 초과하여 요청에 최종 실패했습니다: {request}")
+        return None
+
 
     def _handle_candle_event(self, topic_str: str, payload: dict):
         """
@@ -144,10 +166,52 @@ class ZMQClient:
         if renew_interval < 10: renew_interval = 10
 
         while not self.stop_event.wait(renew_interval):
-            logger.debug(f"\n[INFO] 모든 캔들 구독을 갱신합니다...")
+            logger.info(f"모든 캔들 구독 갱신을 시작합니다...")
+            
+            all_renewals_succeeded = True
+            
             for interval in self.intervals:
-                # 갱신 요청은 단순히 기존 구독 요청을 다시 보내는 것으로 처리
-                self._send_request({"action": "subscribe_candle", "symbol": self.symbol, "interval": interval})
+                request = {
+                    "action": "subscribe_candle", 
+                    "symbol": self.symbol, 
+                    "interval": interval
+                }
+                response = self._send_request(request)
+                
+                if not (response and response.get('status') == 'ok'):
+                    all_renewals_succeeded = False
+                    logger.error(f"❌ [{interval}] 구독 갱신에 최종 실패했습니다! 응답: {response}")
+
+            # interval 갱신 후
+            if all_renewals_succeeded:
+                if self.consecutive_renewal_failures > 0:
+                    logger.info(
+                        f"✅ 구독 갱신이 정상화되었습니다. (이전 연속 실패: {self.consecutive_renewal_failures}회)"
+                    )
+                self.consecutive_renewal_failures = 0
+            else:
+                self.consecutive_renewal_failures += 1
+                logger.warning(
+                    f"⚠️ 구독 갱신 주기에 실패가 포함되었습니다. (현재 연속 {self.consecutive_renewal_failures}회 실패)"
+                )
+                
+                # 연속 실패
+                if self.consecutive_renewal_failures >= self.MAX_CONSECUTIVE_FAILURES:
+                    critical_msg = (
+                        f"🚨🚨🚨 [심각] ZMQ 구독 갱신이 {self.consecutive_renewal_failures}회 연속 실패했습니다!\n"
+                        f"- 클라이언트 ID: {self.client_id}\n"
+                        f"- 서버와의 연결이 끊겼을 가능성이 매우 높습니다.\n"
+                        f"- 데이터 수신이 중단되었을 수 있으니 서버 및 네트워크 상태를 즉시 확인하세요."
+                    )
+                    logger.critical(critical_msg)
+                    
+                    try:
+                        from common.logger_setup import send_direct_webhook
+                        send_direct_webhook(critical_msg)
+                    except ImportError:
+                        logger.error("웹훅 발송에 실패했습니다. (send_direct_webhook 함수를 찾을 수 없음)")
+                    except Exception as e:
+                        logger.error(f"웹훅 발송 중 예외 발생: {e}")
         logger.debug(f"[{self.client_id}][RENEWER] 구독 갱신 스레드 종료.")
 
     def _strategy_trigger_thread(self):
