@@ -196,7 +196,8 @@ if __name__ == "__main__":
         client_id=CLIENT_ID,
         symbol=config.SYMBOL,
         intervals=config.INTERVALS,
-        candle_handler_callback=chart_analyzer.analyze
+        candle_handler_callback=chart_analyzer.analyze,
+        throttle_seconds=config.ZMQ_THROTTLE_SECONDS 
     )
     
     if client.start():

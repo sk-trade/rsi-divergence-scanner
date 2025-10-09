@@ -25,7 +25,7 @@ class ZMQClient:
     5. 데이터 업데이트 시 등록된 콜백 함수(전략)를 트리거.
     6. 별도의 스레드에서 모든 네트워크 I/O 및 주기적 작업을 처리하여 메인 스레드를 블로킹하지 않음.
     """
-    def __init__(self, client_id: str, symbol: str, intervals: List[str], candle_handler_callback: Callable[[Dict[str, deque]], None]):
+    def __init__(self, client_id: str, symbol: str, intervals: List[str], candle_handler_callback: Callable[[Dict[str, deque]], None], throttle_seconds: Optional[float] = 0.1):
         """
         ZMQClient 인스턴스를 초기화합니다.
 
@@ -35,11 +35,15 @@ class ZMQClient:
             intervals (List[str]): 구독할 캔들의 시간 간격 리스트 (예: ["minute1", "minute5"]).
             candle_handler_callback (Callable): 새로운 캔들 데이터가 수신될 때마다 호출될 콜백 함수.
                                                 이 함수는 `candle_deques` 딕셔너리를 인자로 받습니다.
+            throttle_seconds (Optional[float]): 콜백 함수 호출을 제한하는 시간(초). 
+                                                            None이나 0으로 설정하면 제한 없이 즉시 호출됩니다.
+                                                            기본값은 0.1초입니다.
         """
         self.client_id = client_id
         self.symbol = symbol
         self.intervals = intervals
         self.candle_handler_callback = candle_handler_callback # 캔들 이벤트 처리 콜백 함수
+        self.throttle_seconds = throttle_seconds  
 
         self.context = zmq.Context()
         self.stop_event = threading.Event()  # 모든 백그라운드 스레드의 종료를 제어하는 이벤트
@@ -48,7 +52,7 @@ class ZMQClient:
 
         self.consecutive_renewal_failures = 0
         self.MAX_CONSECUTIVE_FAILURES = 3 
-        
+
         # 각 인터벌별 캔들 데이터를 저장하는 딕셔너리
         self.candle_deques: Dict[str, deque] = {
             interval: deque(maxlen=CANDLE_DEQUE_MAXLEN) for interval in self.intervals
@@ -217,22 +221,26 @@ class ZMQClient:
     def _strategy_trigger_thread(self):
         """
         [스레드 타겟] 데이터 업데이트 이벤트를 감지하여 전략 콜백 함수를 실행합니다.
-
-        `data_updated_event`를 사용하여 데이터가 폭주할 때 콜백이 과도하게
-        호출되는 것을 방지하고, 일정한 간격으로 한 번씩만 실행되도록 제어합니다. (디바운싱/스로틀링 효과)
+        ...
         """
-        EXECUTION_INTERVAL_SECONDS = 0.1 # 콜백 실행 간 최소 대기 시간
-
-        while not self.stop_event.wait(EXECUTION_INTERVAL_SECONDS):
-            if self.data_updated_event.is_set():
-                self.data_updated_event.clear() # 이벤트 플래그 리셋
-                
-                try:
-                    # 데이터 복사를 피하기 위해 락을 건 상태에서 콜백 직접 호출
-                    with self.storage_lock:
-                        self.candle_handler_callback(self.candle_deques)
-                except Exception as e:
-                    logger.error(f"전략 콜백 함수 실행 중 오류: {e}", exc_info=True)
+        if self.throttle_seconds and self.throttle_seconds > 0:
+            while not self.stop_event.wait(self.throttle_seconds):
+                if self.data_updated_event.is_set():
+                    self.data_updated_event.clear()
+                    try:
+                        with self.storage_lock:
+                            self.candle_handler_callback(self.candle_deques)
+                    except Exception as e:
+                        logger.error(f"전략 콜백 함수 실행 중 오류: {e}", exc_info=True)
+        else:
+            while not self.stop_event.is_set():
+                if self.data_updated_event.wait(timeout=1): 
+                    self.data_updated_event.clear()
+                    try:
+                        with self.storage_lock:
+                            self.candle_handler_callback(self.candle_deques)
+                    except Exception as e:
+                        logger.error(f"전략 콜백 함수 실행 중 오류: {e}", exc_info=True)
 
         logger.debug(f"[{self.client_id}][TRIGGER] 전략 트리거 스레드 종료.")
 
