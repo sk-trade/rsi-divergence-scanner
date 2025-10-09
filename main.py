@@ -176,7 +176,7 @@ class ChartAnalyzer:
         elif self.ranking_manager.is_seeking('high') and latest['rsi'] <= config.RSI_HIGH_EXIT_THRESHOLD:
             final_high_session = self.ranking_manager.get_current_session_info('high')
             if final_high_session:
-                pullback_percent = ((final_high_session['price'] - final_high_session['price']) / final_high_session['price']) * 100
+                pullback_percent = ((final_high_session['price'] - latest_price) / final_high_session['price']) * 100
                 context_info = ""
                 if most_traded_level and abs(final_high_session['price'] - most_traded_level) / most_traded_level < (config.KEY_LEVEL_TOLERANCE_PERCENT / 100):
                     context_info = " (⚠️핵심 저항 구간에서 하락!)"
