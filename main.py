@@ -85,7 +85,10 @@ class ChartAnalyzer:
         # 지표 계산
         df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=config.RSI_WINDOW).rsi()
         df['ma_long'] = ta.trend.sma_indicator(df['close'], window=config.LONG_TERM_MA_WINDOW)
-        
+
+        if 'ts' not in df.columns and 'timestamp' in df.columns:
+            df['ts'] = df['timestamp']
+
         latest = df.iloc[-1]
         if pd.isna(latest['rsi']) or pd.isna(latest['ma_long']):
             return
@@ -106,7 +109,7 @@ class ChartAnalyzer:
         print(status_msg, end="")
 
         latest_price = latest['close']
-        latest_timestamp = latest['timestamp']
+        latest_timestamp = latest['ts']
         indicator_data = { 'rsi': latest['rsi'] }
 
         # --- 전략적 의사결정  ---
@@ -130,7 +133,7 @@ class ChartAnalyzer:
                                f" - RSI: {last_low_point['indicators']['rsi']:.2f} -> {indicator_data['rsi']:.2f} (상승)")
                     logger.warning(div_msg)
                     send_direct_webhook(div_msg)
-                self.divergence_tracker['low']['last_point'] = {'price': latest_price, 'indicators': indicator_data, 'timestamp': latest_timestamp}
+                self.divergence_tracker['low']['last_point'] = {'price': latest_price, 'indicators': indicator_data, 'ts': latest_timestamp}
             
             # 가격이 더 낮아졌을 때만 갱신하도록 RankingManager에 위임
             self.ranking_manager.update_if_needed('low', latest_price, latest_timestamp, indicator_data)
@@ -167,7 +170,7 @@ class ChartAnalyzer:
                             f" - RSI: {last_high_point['indicators']['rsi']:.2f} -> {indicator_data['rsi']:.2f} (하락)")
                     logger.warning(div_msg)
                     send_direct_webhook(div_msg)
-                self.divergence_tracker['high']['last_point'] = {'price': latest_price, 'indicators': indicator_data, 'timestamp': latest_timestamp}
+                self.divergence_tracker['high']['last_point'] = {'price': latest_price, 'indicators': indicator_data, 'ts': latest_timestamp}
             
             # 가격이 더 높아졌을 때만 갱신하도록 RankingManager에 위임
             self.ranking_manager.update_if_needed('high', latest_price, latest_timestamp, indicator_data)
@@ -197,7 +200,8 @@ if __name__ == "__main__":
         symbol=config.SYMBOL,
         intervals=config.INTERVALS,
         candle_handler_callback=chart_analyzer.analyze,
-        throttle_seconds=config.ZMQ_THROTTLE_SECONDS 
+        throttle_seconds=config.ZMQ_THROTTLE_SECONDS,
+        exchange=config.EXCHANGE,
     )
     
     if client.start():

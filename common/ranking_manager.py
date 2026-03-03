@@ -28,6 +28,12 @@ class RankingManager:
 
         self._load_boards()
 
+    def _to_datetime(self, item):
+        ts_value = item.get('ts') if item.get('ts') is not None else item.get('timestamp')
+        if isinstance(ts_value, (int, float)):
+            return pd.to_datetime(ts_value, unit='ms', utc=True)
+        return pd.to_datetime(ts_value, utc=True)
+
     def _load_boards(self):
         """프로그램 시작 시 파일에서 랭킹 보드를 불러옵니다."""
         try:
@@ -77,7 +83,12 @@ class RankingManager:
         display_board = board[:config.RANKING_MAX_COUNT]
 
         for i, item in enumerate(display_board):
-            dt = pd.to_datetime(item['timestamp'], utc=True).tz_convert('Asia/Seoul')
+            ts_value = item.get('ts') if item.get('ts') is not None else item.get('timestamp')
+            if isinstance(ts_value, (int, float)):
+                dt = pd.to_datetime(ts_value, unit='ms', utc=True)
+            else:
+                dt = pd.to_datetime(ts_value, utc=True)
+            dt = dt.tz_convert('Asia/Seoul')
             dt_str = dt.strftime('%m-%d %H:%M')
             indicators_str = ", ".join([f"{key.upper()}:{val:.2f}" for key, val in item.get('indicators', {}).items()])
             
@@ -107,7 +118,7 @@ class RankingManager:
         """저점 또는 고점 탐색을 시작합니다."""
         with self.lock:
             self.seeking_status[mode] = True
-            self.current_sessions[mode] = {'price': price, 'indicators': indicator_data, 'timestamp': timestamp}
+            self.current_sessions[mode] = {'price': price, 'indicators': indicator_data, 'timestamp': timestamp, 'ts': timestamp}
             self.last_update_time = 0
             self.last_notified_ranks[mode] = None
         
@@ -129,7 +140,7 @@ class RankingManager:
             if not is_new_extreme: return
 
             old_price = self.current_sessions[mode]['price']
-            self.current_sessions[mode].update({'price': price, 'indicators': indicator_data, 'timestamp': timestamp})
+            self.current_sessions[mode].update({'price': price, 'indicators': indicator_data, 'timestamp': timestamp, 'ts': timestamp})
             type_str = "저점" if mode == 'low' else "고점"
             logger.info(f"{type_str} 갱신됨: {old_price:,.0f} -> {price:,.0f} (로그 전용)")
 
@@ -217,7 +228,7 @@ class RankingManager:
                 initial_low_count = len(self.boards['low'])
                 self.boards['low'] = [
                     item for item in self.boards['low']
-                    if (now_ts - pd.to_datetime(item['timestamp'], utc=True)).total_seconds() * 1000 <= valid_duration_ms
+                    if (now_ts - self._to_datetime(item)).total_seconds() * 1000 <= valid_duration_ms
                 ]
                 removed_count += initial_low_count - len(self.boards['low'])
 
@@ -225,7 +236,7 @@ class RankingManager:
                 initial_high_count = len(self.boards['high'])
                 self.boards['high'] = [
                     item for item in self.boards['high']
-                    if (now_ts - pd.to_datetime(item['timestamp'], utc=True)).total_seconds() * 1000 <= valid_duration_ms
+                    if (now_ts - self._to_datetime(item)).total_seconds() * 1000 <= valid_duration_ms
                 ]
                 removed_count += initial_high_count - len(self.boards['high'])
 

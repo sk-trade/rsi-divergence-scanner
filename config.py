@@ -26,8 +26,9 @@ ZMQ_THROTTLE_SECONDS = 0.1
 
 # --- 분석 대상 및 전략 설정 ---
 SYMBOL = "KRW-BTC"
-INTERVALS = ["minute30"]
-BASE_INTERVAL = INTERVALS[0]
+EXCHANGE = os.getenv("EXCHANGE", "upbit")
+INTERVALS = ["1h"]
+BASE_INTERVAL = "1h"
 
 # RSI 기반 탐색 전략 설정
 RSI_WINDOW = 14
@@ -48,16 +49,16 @@ KEY_LEVEL_TOLERANCE_PERCENT = 1.0 # 핵심 지지/저항 레벨로 간주할 가
 # --- 데이터 관리 설정 ---
 # 랭킹 유효 기간에 맞춰 필요한 캔들 개수 자동 계산
 try:
-    # 'minute'이 포함된 인터벌만 자동 계산
-    if 'minute' in BASE_INTERVAL:
-        minutes = int(BASE_INTERVAL.replace('minute', ''))
+    if BASE_INTERVAL.endswith("m"):
+        minutes = int(BASE_INTERVAL[:-1])
         CANDLES_PER_DAY = (24 * 60) // minutes
-    # 'hour'가 포함된 경우 (예: 'hour4')
-    elif 'hour' in BASE_INTERVAL:
-        hours = int(BASE_INTERVAL.replace('hour', ''))
+    elif BASE_INTERVAL.endswith("h"):
+        hours = int(BASE_INTERVAL[:-1])
         CANDLES_PER_DAY = 24 // hours
+    elif BASE_INTERVAL.endswith("d"):
+        CANDLES_PER_DAY = 1
     else:
-        CANDLES_PER_DAY = 48 # 기본값 (30분봉 기준)
+        CANDLES_PER_DAY = 48
 except (ValueError, TypeError):
     CANDLES_PER_DAY = 48
     

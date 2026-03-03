@@ -25,7 +25,7 @@ class ZMQClient:
     5. 데이터 업데이트 시 등록된 콜백 함수(전략)를 트리거.
     6. 별도의 스레드에서 모든 네트워크 I/O 및 주기적 작업을 처리하여 메인 스레드를 블로킹하지 않음.
     """
-    def __init__(self, client_id: str, symbol: str, intervals: List[str], candle_handler_callback: Callable[[Dict[str, deque]], None], throttle_seconds: Optional[float] = 0.1):
+    def __init__(self, client_id: str, symbol: str, intervals: List[str], candle_handler_callback: Callable[[Dict[str, deque]], None], exchange: str = "upbit", throttle_seconds: Optional[float] = 0.1):
         """
         ZMQClient 인스턴스를 초기화합니다.
 
@@ -35,15 +35,18 @@ class ZMQClient:
             intervals (List[str]): 구독할 캔들의 시간 간격 리스트 (예: ["minute1", "minute5"]).
             candle_handler_callback (Callable): 새로운 캔들 데이터가 수신될 때마다 호출될 콜백 함수.
                                                 이 함수는 `candle_deques` 딕셔너리를 인자로 받습니다.
-            throttle_seconds (Optional[float]): 콜백 함수 호출을 제한하는 시간(초). 
+            exchange (str): 거래소 식별자 (예: "upbit").
+            throttle_seconds (Optional[float]): 콜백 함수 호출을 제한하는 시간(초).
                                                             None이나 0으로 설정하면 제한 없이 즉시 호출됩니다.
                                                             기본값은 0.1초입니다.
         """
         self.client_id = client_id
         self.symbol = symbol
-        self.intervals = intervals
+        self.exchange = exchange or "upbit"
+        self.exchange_prefix = self.exchange.upper()
+        self.intervals = [self._to_canonical_interval(interval) for interval in intervals]
         self.candle_handler_callback = candle_handler_callback # 캔들 이벤트 처리 콜백 함수
-        self.throttle_seconds = throttle_seconds  
+        self.throttle_seconds = throttle_seconds
 
         self.context = zmq.Context()
         self.stop_event = threading.Event()  # 모든 백그라운드 스레드의 종료를 제어하는 이벤트
@@ -51,13 +54,40 @@ class ZMQClient:
         self.data_updated_event = threading.Event() # 데이터 업데이트 시 전략 실행을 트리거하기 위한 이벤트 (디바운싱용)
 
         self.consecutive_renewal_failures = 0
-        self.MAX_CONSECUTIVE_FAILURES = 3 
+        self.MAX_CONSECUTIVE_FAILURES = 3
 
         # 각 인터벌별 캔들 데이터를 저장하는 딕셔너리
         self.candle_deques: Dict[str, deque] = {
             interval: deque(maxlen=CANDLE_DEQUE_MAXLEN) for interval in self.intervals
         }
         self.threads: List[threading.Thread] = []
+
+    def _to_canonical_interval(self, interval: str) -> str:
+        if not interval:
+            return interval
+        if interval.endswith(("m", "h", "d")):
+            return interval
+        if interval.startswith("minute"):
+            minutes = interval.replace("minute", "")
+            if minutes == "60":
+                return "1h"
+            if minutes == "240":
+                return "4h"
+            if minutes == "1440":
+                return "1d"
+            return f"{minutes}m"
+        if interval.startswith("hour"):
+            hours = interval.replace("hour", "")
+            return f"{hours}h"
+        if interval.startswith("day"):
+            days = interval.replace("day", "")
+            return f"{days}d"
+        return interval
+
+    def _extract_ts(self, candle: dict):
+        if not isinstance(candle, dict):
+            return None
+        return candle.get("ts") if "ts" in candle else candle.get("timestamp")
 
     def _send_request(self, request: dict, max_retries: int = 5, initial_delay: int = 2) -> Optional[dict]:
         """
@@ -117,28 +147,52 @@ class ZMQClient:
             topic_str (str): 이벤트가 발생한 ZMQ 토픽 문자열.
             payload (dict): 이벤트와 관련된 데이터.
         """
-        _, symbol, interval, event_type = topic_str.split(':')
+        try:
+            exchange, channel, symbol, interval, event_type = topic_str.split(':', 4)
+        except ValueError:
+            return
 
-        if interval not in self.candle_deques:
+        if exchange != self.exchange_prefix or channel != "CANDLE":
+            return
+
+        interval = self._to_canonical_interval(interval)
+        if symbol != self.symbol or interval not in self.candle_deques:
             return
 
         target_deque = self.candle_deques[interval]
 
-        with self.storage_lock:
-            if event_type == "UPDATE" and target_deque:
-                target_deque[-1] = payload
-            elif event_type == "CLOSE" and target_deque:
-                target_deque[-1] = payload["closed"] # 마감된 캔들 확정
-                target_deque.append(payload["new"])  # 새로 시작된 캔들 추가
-            elif event_type == "RECONCILE":
-                # 지연된 데이터 등으로 과거 캔들 데이터가 보정될 때 처리
-                reconciled_candle = payload
+        if event_type == "UPDATE":
+            candle = payload.get("candle") if isinstance(payload, dict) else None
+            if not isinstance(candle, dict):
+                return
+            with self.storage_lock:
+                if target_deque:
+                    target_deque[-1] = candle
+        elif event_type == "CLOSE":
+            candle = payload.get("candle") if isinstance(payload, dict) else None
+            new_candle = payload.get("new") if isinstance(payload, dict) else None
+            if not isinstance(candle, dict) or not isinstance(new_candle, dict):
+                return
+            with self.storage_lock:
+                if target_deque:
+                    target_deque[-1] = candle
+                target_deque.append(new_candle)
+        elif event_type == "RECONCILE":
+            candle = payload.get("candle") if isinstance(payload, dict) else None
+            if not isinstance(candle, dict):
+                return
+            reconcile_ts = self._extract_ts(candle)
+            if reconcile_ts is None:
+                return
+            with self.storage_lock:
                 for i in range(len(target_deque) - 1, -1, -1):
-                    if target_deque[i]['timestamp'] == reconciled_candle['timestamp']:
-                        logger.info(f"\n[INFO] [{interval}] 캔들 데이터 보정 발생! T:{reconciled_candle['timestamp']}")
-                        target_deque[i] = reconciled_candle
+                    if self._extract_ts(target_deque[i]) == reconcile_ts:
+                        logger.info(f"\n[INFO] [{interval}] 캔들 데이터 보정 발생! T:{reconcile_ts}")
+                        target_deque[i] = candle
                         break
-        
+        else:
+            return
+
         # 데이터가 업데이트되었음을 다른 스레드에 알림
         self.data_updated_event.set()
 
@@ -148,7 +202,7 @@ class ZMQClient:
         socket_sub.connect(f"tcp://{ZMQ_GATEWAY_HOST}:{ZMQ_GATEWAY_PUB_PORT}")
 
         for interval in self.intervals:
-            topic = f"CANDLE:{self.symbol}:{interval}:"
+            topic = f"{self.exchange_prefix}:CANDLE:{self.symbol}:{interval}:"
             socket_sub.setsockopt_string(zmq.SUBSCRIBE, topic)
             logger.info(f"[{self.client_id}][SUB] 토픽 구독: '{topic}'")
 
@@ -176,9 +230,10 @@ class ZMQClient:
             
             for interval in self.intervals:
                 request = {
-                    "action": "subscribe_candle", 
-                    "symbol": self.symbol, 
-                    "interval": interval
+                    "action": "subscribe_candle",
+                    "symbol": self.symbol,
+                    "interval": interval,
+                    "exchange": self.exchange,
                 }
                 response = self._send_request(request)
                 
@@ -258,7 +313,7 @@ class ZMQClient:
 
         # 모든 인터벌에 대해 과거 데이터 스냅샷을 먼저 요청
         for interval in self.intervals:
-            req = {"action": "subscribe_candle", "symbol": self.symbol, "interval": interval, "history_count": CANDLE_DEQUE_MAXLEN}
+            req = {"action": "subscribe_candle", "symbol": self.symbol, "interval": interval, "history_count": CANDLE_DEQUE_MAXLEN, "exchange": self.exchange}
             response = self._send_request(req)
             
             if response and response.get('status') == 'ok' and response.get('data'):
@@ -293,7 +348,7 @@ class ZMQClient:
         # 게이트웨이에 더 이상 데이터를 받지 않겠다고 알림
         for interval in self.intervals:
             logger.debug(f"[{interval}] 구독 해지 요청 중...")
-            self._send_request({"action": "unsubscribe_candle", "symbol": self.symbol, "interval": interval})
+            self._send_request({"action": "unsubscribe_candle", "symbol": self.symbol, "interval": interval, "exchange": self.exchange})
         
         # 모든 스레드가 종료될 때까지 대기
         for t in self.threads:
